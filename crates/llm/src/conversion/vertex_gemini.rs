@@ -448,6 +448,13 @@ pub mod from_completions {
 		})
 	}
 
+	/// Convert an OpenAI `image_url` content part into a Gemini part.
+	///
+	/// Inline `data:` payloads become `inlineData`; `gs://` objects and public http(s) URLs
+	/// become `fileData`. http(s) is forwarded on the same terms as [`file_part`]: the backend
+	/// fetches images by URL just as it fetches documents, so the two part shapes must not
+	/// disagree about the same URL. `image_url` is the shape most OpenAI clients send for
+	/// images, so rejecting http(s) here failed the common case.
 	fn image_part(image_url: Option<&Value>) -> Result<vg::Part, AIError> {
 		let url = image_url
 			.and_then(|u| u.get("url"))
@@ -458,21 +465,24 @@ pub mod from_completions {
 			return Ok(inline_data_part(mime, data));
 		}
 
-		if url.starts_with("gs://") {
-			// Vertex's fileData requires a mimeType for gs:// objects and won't infer one
+		if url.starts_with("gs://") || is_http_uri(url) {
+			// Vertex's fileData requires a mimeType and won't infer one for either scheme.
 			let Some(mime) =
 				explicit_mime_hint(image_url).or_else(|| mime_from_extension(url).map(str::to_string))
 			else {
+				// Named without its query string: an image can be behind a signed URL too, and
+				// that signature must not reach the client or the logs. See `uri_without_query`.
+				let named = uri_without_query(url);
+				let scheme = if is_http_uri(url) { "http(s)" } else { "gs://" };
 				return Err(AIError::UnsupportedConversion(strng::new(format!(
-					"gs:// image_url ({url}) has no recognised extension or MIME hint; pass image_url.format (or mime_type/content_type), or use an object with a known extension"
+					"{scheme} image_url ({named}) has no recognised extension or MIME hint; pass image_url.format (or mime_type/content_type), or use a URL with a known extension"
 				))));
 			};
 			return Ok(file_data_part(&mime, url));
 		}
 
-		// http(s) and anything else are not fetchable by Vertex.
 		Err(AIError::UnsupportedConversion(strng::new(format!(
-			"native Gemini path rejects http(s) image_url ({url}); upload to gs:// or send inline data:"
+			"image_url ({url}) is not a resolvable reference; send an inline data: URI, or a gs:// or http(s) URL"
 		))))
 	}
 
