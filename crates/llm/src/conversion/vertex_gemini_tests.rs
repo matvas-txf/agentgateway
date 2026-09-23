@@ -428,18 +428,109 @@ fn empty_string_user_content_is_preserved() {
 	assert_eq!(g["contents"][0]["parts"][0]["text"], "");
 }
 
+/// Build a request carrying one `image_url` part whose `image_url` object is `v`.
+///
+/// Shaped like [`file_content`] — a text part first, so the part under test is `parts[1]`
+/// in both and the two can be compared directly.
+fn image_content(v: Value) -> Value {
+	json!({
+		"model": "gemini-2.5-flash",
+		"messages": [{ "role": "user", "content": [
+			{ "type": "text", "text": "What is this document about?" },
+			{ "type": "image_url", "image_url": v }
+		]}]
+	})
+}
+
 #[test]
-fn http_image_url_is_rejected() {
-	let err = from_completions::translate(
-		&req(json!({
-			"model": "gemini-2.5-flash",
-			"messages": [{ "role": "user", "content": [
-				{ "type": "image_url", "image_url": { "url": "https://example.com/cat.png" } }
-			]}]
-		})),
-		true,
+fn http_image_url_becomes_file_data() {
+	// `image_url` used to reject http(s) on the belief that the backend could not fetch it.
+	// The same URL sent as a `file` part is fetched and described, so the rejection was this
+	// gateway's own gap — and `image_url` is the shape OpenAI clients actually send for images.
+	let g = to_gemini(image_content(
+		json!({ "url": "https://example.com/cat.png" }),
+	));
+	let part = &g["contents"][0]["parts"][1];
+	assert_eq!(part["fileData"]["fileUri"], "https://example.com/cat.png");
+	assert_eq!(part["fileData"]["mimeType"], "image/png");
+}
+
+#[test]
+fn http_image_url_and_file_part_agree_on_the_same_url() {
+	// The divergence that motivated this: one URL, two part shapes, opposite outcomes. Pin
+	// them together so they cannot drift apart again.
+	let url = "https://example.com/cat.png";
+	let via_image = to_gemini(image_content(json!({ "url": url })));
+	let via_file = to_gemini(file_content(json!({ "file_id": url })));
+	assert_eq!(
+		via_image["contents"][0]["parts"][1], via_file["contents"][0]["parts"][1],
+		"image_url and file must produce the same part for the same URL"
 	);
-	assert!(err.is_err(), "http(s) image_url must be rejected");
+}
+
+#[test]
+fn image_url_without_extension_uses_explicit_mime_hint() {
+	let g = to_gemini(image_content(json!({
+		"url": "https://example.com/render", "format": "image/webp"
+	})));
+	let part = &g["contents"][0]["parts"][1];
+	assert_eq!(part["fileData"]["fileUri"], "https://example.com/render");
+	assert_eq!(part["fileData"]["mimeType"], "image/webp");
+}
+
+#[test]
+fn http_image_url_without_extension_or_hint_is_rejected() {
+	// Same rule as file_part: the backend needs an explicit mimeType and this hop cannot
+	// infer one without fetching the URL.
+	let err = from_completions::translate(
+		&req(image_content(json!({ "url": "https://example.com/render" }))),
+		true,
+	)
+	.expect_err("extension-less http(s) image_url with no hint must be rejected");
+	let msg = err.to_string();
+	assert!(
+		msg.contains("http(s)"),
+		"the error must say which scheme it rejected, got: {msg}"
+	);
+}
+
+#[test]
+fn rejected_signed_image_url_does_not_leak_its_signature() {
+	// image_part names the URL in its rejection just as file_part does, so it inherits the
+	// same hazard: an image can sit behind a signed URL, and that query string is a credential
+	// that reaches the client and the logs.
+	let err = from_completions::translate(
+		&req(image_content(json!({
+			"url": "https://storage.googleapis.com/bucket/render?X-Goog-Signature=deadbeef"
+		}))),
+		true,
+	)
+	.expect_err("extension-less signed image URL must be rejected");
+	let msg = err.to_string();
+	assert!(
+		!msg.contains("deadbeef") && !msg.contains("X-Goog-Signature"),
+		"signed URL query string must not appear in the error, got: {msg}"
+	);
+	assert!(
+		msg.contains("https://storage.googleapis.com/bucket/render"),
+		"the error must still name the offending object, got: {msg}"
+	);
+}
+
+#[test]
+fn non_fetchable_image_url_scheme_is_still_rejected() {
+	// http(s), gs:// and data: are the resolvable shapes; anything else has no route to the
+	// backend and must fail here rather than be dropped silently.
+	let err = from_completions::translate(
+		&req(image_content(json!({ "url": "ftp://example.com/cat.png" }))),
+		true,
+	)
+	.expect_err("a scheme the backend cannot fetch must be rejected");
+	let msg = err.to_string();
+	assert!(
+		msg.contains("ftp://example.com/cat.png"),
+		"the error must name the offending reference, got: {msg}"
+	);
 }
 
 // ---------- Request: tools ----------
