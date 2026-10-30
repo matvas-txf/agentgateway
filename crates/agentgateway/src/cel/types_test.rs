@@ -168,6 +168,7 @@ fn llm_context_with_usage(
 		request_model: "model".into(),
 		original_model: None,
 		provider: "provider".into(),
+		region: None,
 		streaming: false,
 		params: llm::LLMRequestParams::default(),
 		prompt: None,

@@ -72,6 +72,7 @@ fn llm_request_with_tokens(input_tokens: Option<u64>) -> LLMRequest {
 		request_model: "test-model".into(),
 		original_model: None,
 		provider: "test-provider".into(),
+		region: None,
 		streaming: true,
 		params: Default::default(),
 		prompt: None,
@@ -1401,6 +1402,75 @@ fn vertex_backend_info() -> crate::http::auth::BackendInfo {
 }
 
 #[tokio::test]
+async fn vertex_requests_record_backend_region() {
+	for region in [None, Some("global"), Some("us-central1"), Some("us")] {
+		let provider = AIProvider::Vertex(vertex::Provider {
+			model_override: None,
+			region: region.map(strng::new),
+			project_id: strng::new("test-project"),
+		});
+		let req = gemini_generate_content_request(
+			"https://example.com/v1beta/models/gemini-2.5-flash:generateContent",
+		);
+		let RequestResult::Success { llm_request, .. } = provider
+			.process_gemini_request(&vertex_backend_info(), None, req, false, &mut None, None)
+			.await
+			.expect("generateContent request should process")
+		else {
+			panic!("expected forwarded request");
+		};
+		// An unset region uses the global endpoint.
+		let expected = region.or(Some("global"));
+		assert_eq!(llm_request.region.as_deref(), expected, "generateContent");
+
+		let req = ::http::Request::builder()
+			.uri("/v1/chat/completions")
+			.header(::http::header::CONTENT_TYPE, "application/json")
+			.body(Body::from(
+				br#"{"model": "gemini-2.5-flash", "messages": [{"role": "user", "content": "hello"}]}"#
+					.to_vec(),
+			))
+			.unwrap();
+		let RequestResult::Success { llm_request, .. } = provider
+			.process_completions_request(&vertex_backend_info(), None, req, false, &mut None, None)
+			.await
+			.expect("completions request should process")
+		else {
+			panic!("expected forwarded request");
+		};
+		assert_eq!(llm_request.region.as_deref(), expected, "completions");
+	}
+}
+
+#[tokio::test]
+async fn non_vertex_requests_record_no_region() {
+	let provider = custom_provider(custom::ProviderFormat::GenerateContent);
+	let req = ::http::Request::builder()
+		.uri("/v1/chat/completions")
+		.header(::http::header::CONTENT_TYPE, "application/json")
+		.body(Body::from(
+			br#"{"model": "gemini-2.5-flash", "messages": [{"role": "user", "content": "hello"}]}"#
+				.to_vec(),
+		))
+		.unwrap();
+	let RequestResult::Success { llm_request, .. } = provider
+		.process_completions_request(
+			&openai_test_backend_info(),
+			None,
+			req,
+			false,
+			&mut None,
+			None,
+		)
+		.await
+		.expect("completions request should process")
+	else {
+		panic!("expected forwarded request");
+	};
+	assert_eq!(llm_request.region, None);
+}
+
+#[tokio::test]
 async fn gemini_generate_content_forwards_unknown_top_level_fields() {
 	let provider = AIProvider::Vertex(vertex::Provider {
 		model_override: None,
@@ -1638,6 +1708,7 @@ fn gemini_count_tokens_response_reports_total_tokens() {
 		request_model: "gemini-2.5-flash".into(),
 		original_model: None,
 		provider: "gcp.gemini".into(),
+		region: None,
 		streaming: false,
 		params: Default::default(),
 		prompt: None,
@@ -1677,6 +1748,7 @@ async fn anthropic_count_tokens_preserves_upstream_errors() {
 		request_model: "us.anthropic.claude-haiku-4-5-20251001-v1:0".into(),
 		original_model: None,
 		provider: "aws.bedrock".into(),
+		region: None,
 		streaming: false,
 		params: Default::default(),
 		prompt: None,
@@ -2620,6 +2692,7 @@ async fn process_response_routes_streaming_error_to_buffered_path() {
 		request_model: "input-model".into(),
 		original_model: None,
 		provider: Default::default(),
+		region: None,
 		streaming: true,
 		params: Default::default(),
 		prompt: None,
@@ -2915,6 +2988,7 @@ async fn process_streaming_bedrock_completions_normalizes_sse_headers_and_done()
 				request_model: "input-model".into(),
 				original_model: None,
 				provider: Default::default(),
+				region: None,
 				streaming: true,
 				params: Default::default(),
 				prompt: None,
@@ -2973,6 +3047,7 @@ async fn process_streaming_exposes_request_llm_context_to_response_cel() {
 				request_model: "input-model".into(),
 				original_model: None,
 				provider: "openai".into(),
+				region: None,
 				streaming: true,
 				params: Default::default(),
 				prompt: None,
@@ -3113,6 +3188,7 @@ fn setup_request_custom_path_override_wins_over_format_path() {
 		request_model: "input-model".into(),
 		original_model: None,
 		provider: Default::default(),
+		region: None,
 		streaming: false,
 		params: Default::default(),
 		prompt: None,
@@ -3150,6 +3226,7 @@ fn setup_request_drops_inbound_query_only_when_translated() {
 		request_model: "model".into(),
 		original_model: None,
 		provider: Default::default(),
+		region: None,
 		streaming: false,
 		params: Default::default(),
 		prompt: None,
@@ -3227,6 +3304,7 @@ fn setup_request_custom_generate_content_defaults_to_the_native_path() {
 			request_model: "gemini-2.5-flash".into(),
 			original_model: None,
 			provider: Default::default(),
+			region: None,
 			streaming,
 			params: Default::default(),
 			prompt: None,
@@ -3268,6 +3346,7 @@ fn setup_request_custom_count_tokens_defaults_to_the_native_path() {
 		request_model: "gemini-2.5-flash".into(),
 		original_model: None,
 		provider: Default::default(),
+		region: None,
 		streaming: false,
 		params: Default::default(),
 		prompt: None,
@@ -3307,6 +3386,7 @@ fn llm_request_for_path(request_model: &str) -> LLMRequest {
 		request_model: request_model.into(),
 		original_model: None,
 		provider: Default::default(),
+		region: None,
 		streaming: false,
 		params: Default::default(),
 		prompt: None,
@@ -3352,6 +3432,7 @@ fn native_gemini_llm_request(request_model: &str, streaming: bool) -> LLMRequest
 		request_model: request_model.into(),
 		original_model: None,
 		provider: Default::default(),
+		region: None,
 		streaming,
 		params: Default::default(),
 		prompt: None,
@@ -3977,6 +4058,7 @@ async fn bedrock_from_messages_stream_captures_completion() {
 			request_model: "us.anthropic.claude-haiku-4-5-20251001-v1:0".into(),
 			original_model: None,
 			provider: "bedrock".into(),
+			region: None,
 			streaming: true,
 			params: Default::default(),
 			prompt: None,
@@ -4028,6 +4110,7 @@ async fn bedrock_from_messages_stream_skips_completion_when_disabled() {
 			request_model: "us.anthropic.claude-haiku-4-5-20251001-v1:0".into(),
 			original_model: None,
 			provider: "bedrock".into(),
+			region: None,
 			streaming: true,
 			params: Default::default(),
 			prompt: None,
@@ -4076,6 +4159,7 @@ async fn bedrock_from_messages_stream_captures_tool_calls() {
 			request_model: "us.anthropic.claude-haiku-4-5-20251001-v1:0".into(),
 			original_model: None,
 			provider: "bedrock".into(),
+			region: None,
 			streaming: true,
 			params: Default::default(),
 			prompt: None,
@@ -4136,6 +4220,7 @@ async fn messages_passthrough_stream_captures_completion() {
 			request_model: "claude-haiku-4-5-20251001".into(),
 			original_model: None,
 			provider: "anthropic".into(),
+			region: None,
 			streaming: true,
 			params: Default::default(),
 			prompt: None,
@@ -4185,6 +4270,7 @@ async fn messages_passthrough_stream_skips_completion_when_disabled() {
 			request_model: "claude-haiku-4-5-20251001".into(),
 			original_model: None,
 			provider: "anthropic".into(),
+			region: None,
 			streaming: true,
 			params: Default::default(),
 			prompt: None,
@@ -4230,6 +4316,7 @@ async fn messages_passthrough_stream_captures_tool_calls() {
 			request_model: "claude-haiku-4-5-20251001".into(),
 			original_model: None,
 			provider: "anthropic".into(),
+			region: None,
 			streaming: true,
 			params: Default::default(),
 			prompt: None,
@@ -4286,6 +4373,7 @@ async fn responses_passthrough_stream_captures_completion_and_tool_calls() {
 			request_model: "gpt-4.1-mini".into(),
 			original_model: None,
 			provider: "openai".into(),
+			region: None,
 			streaming: true,
 			params: Default::default(),
 			prompt: None,
@@ -4350,6 +4438,7 @@ data: [DONE]
 			request_model: "gpt-5".into(),
 			original_model: None,
 			provider: "openai".into(),
+			region: None,
 			streaming: true,
 			params: Default::default(),
 			prompt: None,
@@ -4388,6 +4477,7 @@ async fn responses_passthrough_stream_skips_completion_when_disabled() {
 			request_model: "gpt-4.1-mini".into(),
 			original_model: None,
 			provider: "openai".into(),
+			region: None,
 			streaming: true,
 			params: Default::default(),
 			prompt: None,
