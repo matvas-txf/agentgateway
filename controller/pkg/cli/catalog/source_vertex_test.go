@@ -126,3 +126,41 @@ func TestVertexPricingClassifiesTables(t *testing.T) {
 		t.Errorf("tiers = %+v\nwant %+v", got, want)
 	}
 }
+
+func TestVertexClaudeRegionalTiers(t *testing.T) {
+	rates := Rates{Input: "3", Output: "15", CacheRead: "0.3", CacheWrite: "3.75", CacheWriteDetails: map[string]Money{"1h": "6"}}
+	got, err := vertexClaudeRegionalTiers(map[string]Model{
+		"claude-sonnet-4-5@20250929": {Rates: rates},
+		"claude-opus-5@default":      {Rates: Rates{Input: "5"}},
+		"claude-haiku-5-5@default": {Rates: Rates{Input: "0.1"}, Tiers: []Tier{
+			{ContextOver: 100000, Rates: Rates{Input: "0.5"}},
+			{ServiceTier: "priority", Rates: Rates{Input: "0.2"}},
+		}},
+		// Older Claude models have no regional premium.
+		"claude-opus-4-1@20250805":      {Rates: rates},
+		"claude-sonnet-4@20250514":      {Rates: rates},
+		"claude-3-5-sonnet-v2@20241022": {Rates: rates},
+		"gemini-3.1-pro":                {Rates: rates},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]Model{
+		"claude-sonnet-4-5@20250929": {Tiers: []Tier{{Region: "regional", Rates: Rates{
+			Input: "3.3", Output: "16.5", CacheRead: "0.33", CacheWrite: "4.125", CacheWriteDetails: map[string]Money{"1h": "6.6"},
+		}}}},
+		"claude-opus-5@default": {Tiers: []Tier{{Region: "regional", Rates: Rates{Input: "5.5"}}}},
+		"claude-haiku-5-5@default": {Tiers: []Tier{
+			{Region: "regional", Rates: Rates{Input: "0.11"}},
+			{ContextOver: 100000, Region: "regional", Rates: Rates{Input: "0.55"}},
+		}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("tiers = %+v, want %+v", got, want)
+	}
+	for id, m := range got {
+		if err := m.validate(); err != nil {
+			t.Errorf("%s: %v", id, err)
+		}
+	}
+}

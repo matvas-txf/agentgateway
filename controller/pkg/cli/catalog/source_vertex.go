@@ -9,9 +9,11 @@ import (
 	"reflect"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/shopspring/decimal"
 	"golang.org/x/net/html"
 )
 
@@ -53,8 +55,96 @@ func init() {
 			_, ok := known[id]
 			return !ok
 		})
+		claude, err := vertexClaudeRegionalTiers(known)
+		if err != nil {
+			return nil, nil, err
+		}
+		maps.Copy(cat.Providers[vertexProviderID].Models, claude)
 		return cat, warnings, nil
 	}
+}
+
+// vertexClaudeVersion matches Claude model IDs on Vertex, such as claude-sonnet-4-5@20250929.
+var vertexClaudeVersion = regexp.MustCompile(`^claude-[a-z]+-(\d+)(?:-(\d+))?@`)
+
+// vertexClaudeRegionalPremium is the regional and multi-region premium over global endpoints for
+// Claude 4.5 and later models.
+var vertexClaudeRegionalPremium = decimal.RequireFromString("1.1")
+
+// vertexClaudeRegionalTiers returns regional tiers for Claude 4.5 and later models, derived from
+// their global standard rates and long-context tiers.
+func vertexClaudeRegionalTiers(known map[string]Model) (map[string]Model, error) {
+	out := map[string]Model{}
+	for id, model := range known {
+		m := vertexClaudeVersion.FindStringSubmatch(id)
+		if m == nil {
+			continue
+		}
+		major, _ := strconv.Atoi(m[1])
+		minor, _ := strconv.Atoi(m[2])
+		if major < 4 || (major == 4 && minor < 5) {
+			continue
+		}
+		var tiers []Tier
+		if !model.Rates.IsZero() {
+			rates, err := scaleRates(model.Rates, vertexClaudeRegionalPremium)
+			if err != nil {
+				return nil, fmt.Errorf("%s: %w", id, err)
+			}
+			tiers = append(tiers, Tier{Region: "regional", Rates: rates})
+		}
+		for _, tier := range model.Tiers {
+			if tier.ServiceTier != "" || tier.Region != "" {
+				continue
+			}
+			rates, err := scaleRates(tier.Rates, vertexClaudeRegionalPremium)
+			if err != nil {
+				return nil, fmt.Errorf("%s: %w", id, err)
+			}
+			tiers = append(tiers, Tier{ContextOver: tier.ContextOver, Region: "regional", Rates: rates})
+		}
+		if len(tiers) > 0 {
+			out[id] = Model{Tiers: tiers}
+		}
+	}
+	return out, nil
+}
+
+// scaleRates multiplies every set rate by factor.
+func scaleRates(r Rates, factor decimal.Decimal) (Rates, error) {
+	scale := func(m Money) (Money, error) {
+		if m == "" {
+			return m, nil
+		}
+		d, err := m.Decimal()
+		if err != nil {
+			return "", err
+		}
+		return Money(d.Mul(factor).Round(maxFractionalDigits).String()), nil
+	}
+	out := r
+	// Walk every Money field, so rates added to Rates later are scaled too.
+	fields := reflect.ValueOf(&out).Elem()
+	for i := range fields.NumField() {
+		m, ok := fields.Field(i).Addr().Interface().(*Money)
+		if !ok {
+			continue
+		}
+		scaled, err := scale(*m)
+		if err != nil {
+			return Rates{}, err
+		}
+		*m = scaled
+	}
+	out.CacheWriteDetails = maps.Clone(r.CacheWriteDetails)
+	for ttl, m := range out.CacheWriteDetails {
+		scaled, err := scale(m)
+		if err != nil {
+			return Rates{}, err
+		}
+		out.CacheWriteDetails[ttl] = scaled
+	}
+	return out, nil
 }
 
 // vertexParsePricing imports service tier prices, and Non-global prices as regional tiers.
